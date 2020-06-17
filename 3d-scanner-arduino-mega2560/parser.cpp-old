@@ -1,0 +1,25 @@
+#include "parser.hpp"
+
+
+namespace // anon
+{
+
+  constexpr char cmd_prefix = '@';
+
+} // namespace anon
+Parser::Parser(const String& cmd)
+: command_(cmd)
+  {}
+
+auto Parser::get_command_name() -> String
+  {
+    String buf;
+    // make sure we are permitted to continue scanning
+    if(status_ == Ok)
+    {
+      // check for requisite cmd_prefix
+       
+    }
+    return buf; // should be empty if error occurred
+  }
+
