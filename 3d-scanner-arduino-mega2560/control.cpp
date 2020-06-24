@@ -22,7 +22,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 #include "control.hpp"
-#include "Adafruit_VL53L0X.h"
 #include "logger.hpp"
 #include "rcode.hpp"
 #include <avr/wdt.h>
@@ -30,7 +29,6 @@ SOFTWARE.
 
 namespace 
   {
-    Adafruit_VL53L0X tof_sensor {};
     constexpr int   reboot_delay_             = 1000;
     constexpr char  param_prefix_             = '\\';
     constexpr char  command_prefix_           = '@';
@@ -61,7 +59,7 @@ auto Control::begin(Mode m) -> void
     // setup TOF sensor
     constexpr bool failure = false;
     // test for failure conditions
-    if(tof_sensor.begin() == failure)
+    if(tof_sensor_.begin() == failure)
     {
       Log::error()("Time-of-flight sensor initialization failed.");
       halt();
@@ -80,28 +78,26 @@ auto Control::begin(Mode m) -> void
       }
       else  
       {
-        Serial.println("Invalid mode requested");
+        Log::error()("Invalid mode requested");
       }
       halt();
     }
   }
 auto Control::reboot() -> void
   {
-    Log::info()("Rebooting...\n");
+    Log::info()("Rebooting...");
     delay(reboot_delay_);
-    // start watchdog with the provided prescaller
+    // start watchdog timer
     wdt_enable(WDTO_15MS);
-    // wait for the prescaller time to expire
-    // without sending the reset signal by using
-    // the wdt_reset() method
-    while(1) {}
+    // let the timer expire
+    while(true) {}
   }
 auto Control::halt() -> void
   {
     Serial.println("#break");
     standby_all();
     Serial.println("#terminate");
-    Log::info()("Type @reboot to reboot device\n");
+    Log::info()("Type @reboot to reboot device");
     while(true) 
     { 
       auto cmd = get_line();
@@ -140,17 +136,17 @@ auto Control::seek_limit(int limit_pin, SeekOrientation o) -> seek_count_t
   }
 auto Control::auto_set_max() -> seek_count_t
   {
-    Log::info()("Searching for home...\n");
+    Log::info()("Searching for home...");
     auto count = seek_limit(limit_switch_max_, SeekOrientation::Forward);
-    Log::info()("Homing complete.\n");
+    Log::info()("Homing complete.");
     config_.carriage_max_ = count;
     return count;
   }
 auto Control::auto_set_home() -> seek_count_t
   {
-    Log::info()("Searching for home...\n");
+    Log::info()("Searching for home...");
     auto count = seek_limit(limit_switch_min_, SeekOrientation::Reverse);
-    Log::info()("Homing complete.\n");
+    Log::info()("Homing complete.");
     carriage_position_ = 0;
     return count;
   }
@@ -162,10 +158,51 @@ auto Control::standby_all() -> void
   {
     set_standby_all(LOW);
   }
-auto Control::get_line() -> String
+auto Control::error(const String& msg) -> void
   {
-    while(Serial.peek() == -1);
-    return Serial.readStringUntil('\n');
+    Log::error()("#ERROR:", msg);
+    halt();
+  }
+//============================================================================
+// text processing functions
+//============================================================================
+auto Control::data_to_bool(const String& d) -> pair<bool, bool>
+  {
+    pair<bool, bool> result(false, false);
+    const auto& requested_state = d;
+    if ( requested_state == "0" 
+      || requested_state == "false")
+    {
+      result.first  = true;
+      result.second = false;
+    } 
+    else 
+    if( requested_state == "1"
+     || requested_state == "true")
+    {
+      result.first  = true;
+      result.second = true;
+    }
+    return result;
+  }
+auto Control::data_to_int(const String& d) -> pair<bool, int>
+  {
+    pair<bool, int> result(true, 0);
+    // make sure that every character is either a digit, a sign, 
+    // or null terminator
+    for(auto c : d)
+    {
+      if((isdigit(c) || c == '-' || c == '+') == false)
+      {
+        result.first = false;
+        break;
+      }
+    }
+    if(result.first == true)
+    {
+      result.second = atoi(d.c_str()); 
+    }
+    return result;
   }
 auto Control::get_char() -> char
   {
@@ -173,92 +210,97 @@ auto Control::get_char() -> char
     while((ch = Serial.read()) == -1) { yield(); }
     return ch;
   }
+auto Control::get_line() -> String
+  {
+    while(Serial.peek() == -1);
+    return Serial.readStringUntil('\n');
+  }
 auto Control::peek_char() -> int
   {
     int ch;
     while((ch = Serial.peek()) == -1) { yield(); }
     return static_cast<unsigned char>(ch);
   }
-auto Control::error(const String& msg) -> void
+//============================================================================
+// errors and logging
+//============================================================================
+auto Control::error_expected_bool(const String& data) -> void
   {
-    Log::error()("#ERROR:", msg);
-    halt();
+    Log::error()("Expected a boolean value, but got: ", data);
   }
+auto Control::error_expected_int(const String& data) -> void
+  {
+    Log::error()("Expected an integer, but got: ", data);
+  }
+//============================================================================
+//============================================================================
 auto Control::run_command_processor() -> void
   {
-    // structure for mapping rcodes to member functions
-    struct map_entry
-    {
-      using setter_t = auto(Control::*)(const rcode_t&) -> void;
-      using getter_t = auto(Control::*)(const rcode_t&) -> const String&;
-      String    name;
-      setter_t  set_fn;
-      getter_t  get_fn;
-    };
-    // array of rcode mapping
-    static map_entry rcode_map[] = 
-      {
-        map_entry { "carriage.move.steps"     , &Control::rc_carriage_move_steps, nullptr },
-        map_entry { "carriage.auto_set_home"  , &Control::rc_carriage_set_home  , nullptr },
-        map_entry { "carriage.auto_set_span"  , &Control::rc_carriage_set_span  , nullptr },
-//        map_entry { "log.info"                , &Control::rc_log_info           , nullptr }
-        map_entry { "platform.move.steps"     , &Control::rc_platform_move_steps, nullptr },
-        map_entry { "reboot"                  , &Control::rc_reboot             , nullptr }
-      };
     // get and parse command line
     auto cmdline = get_line();
-    {
-      Log::debug()("Received command line: \"", cmdline, "\"");
-    }
+    Log::debug()("Received command line: \"", cmdline, "\"");
     auto rcode = rcode_t::parse(cmdline); 
+    Log::debug()
+      ( "Parsed as:["
+      , rcode.name()
+      , "]["
+      , (int)rcode.command()
+      , "]["
+      , rcode.data()
+      , "]\n"
+      );
+    if(rcode.error() != rcode_t::Error::ok)
     {
-      Log::debug()
-        ( "Parsed as:["
-        , rcode.name()
-        , "]["
-        , (int)rcode.command()
-        , "]["
-        , rcode.data()
-        , "]"
-        );
+      switch(rcode.error())
+      {
+      case rcode_t::Error::expected_end_of_line:
+        Log::error()("Error: expected end of line");
+        break;
+      case rcode_t::Error::expected_identifier:
+        Log::error()("Error: expected identifier");
+        break;
+      case rcode_t::Error::invalid_data:
+        Log::error()("Error: invalid data");
+        break;
+      default:
+        Log::error()("rcode invalid (bad subcommand)");
+      }
+      return;
+    }
+    if(rcode.command() == rcode_t::Command::invalid)
+    {
     }
     // search for requested function by name
-    bool command_not_found = true;
-    for(auto& m : rcode_map)
-    {
-      bool invalid = false;
-      if(rcode.name() == m.name)
-      {
-        command_not_found = false;
-        switch(rcode.command())
+    const map_entry* fn_entry = nullptr;
+    for_each_function(
+      [&] (auto& f)
         {
-        case rcode_t::Command::Invalid:
-          invalid = true;
-          break;
-        case rcode_t::Command::Get:
-          Log::debug()("Executing 'get' command for register:", rcode.name(), '\n');
-          if(m.get_fn)
+          if(fn_entry == nullptr)
           {
-            Serial.println((this->*(m.get_fn))(rcode));
+            if(rcode.name() == f.name)
+            {
+              fn_entry = &f; 
+            }
           }
-          break;
-        case rcode_t::Command::Set:
-          Log::debug()("Executing 'set' command for register:", rcode.name(), "\" with data = \"", rcode.data(), "\"\n");
-          if(m.set_fn)
-          {
-            (this->*m.set_fn)(rcode);
-          }
-          break;
         }
-      }
-      if(invalid) 
-      { 
-        break; // from for loop
-      }
-    }
+    );
+    auto command_not_found = fn_entry == nullptr;
     if(command_not_found)
     {
-      Log::debug()("Command \"", rcode.name(), "\" not recognized.\n");
+      Log::debug()("Command \"", rcode.name(), "\" not recognized.");
+      return;
+    }
+    else
+    {
+      auto callback = fn_entry->callback;
+      if(callback != nullptr)
+      {
+        (this->*(callback))(rcode);
+      }
+      else
+      {
+        Log::warning()("Command does not map to function; no action taken.");
+      }
     }
   }
 auto Control::set_standby_all(pin_value_t pv) -> void
@@ -271,21 +313,23 @@ auto Control::set_standby_all(pin_value_t pv) -> void
 //============================================================================
 auto Control::rc_carriage_move_steps(const rcode_t& rc) -> void
   {
-    auto steps = atoi(rc.data().c_str());
-    Log::info()("Moving carriage ", steps, " steps\n");
-    carriage_.resume();
-    carriage_.set_speed(config_.carriage_speed_);
-    carriage_.step(steps);
-    carriage_.standby();
-  }
-auto Control::rc_platform_move_steps(const rcode_t& rc) -> void
-  {
-    auto steps = atoi(rc.data().c_str());
-    Log::info()("Moving platform  ", steps, " steps\n");
-    platform_.resume();
-    platform_.set_speed(config_.platform_speed_);
-    platform_.step(steps);
-    platform_.standby();
+    auto result = data_to_int(rc.data());
+    if(result.first == true)
+    {
+      const auto& steps = result.second;
+      Log::info()("Moving carriage ", steps, " steps");
+      auto_standby(carriage_, [&]
+        {
+          carriage_.set_speed(config_.carriage_speed_);
+          carriage_.step(steps);
+        }
+      );
+    }
+    else
+    {
+      error_expected_int(rc.data());
+      halt();
+    }
   }
 auto Control::rc_carriage_set_home(const rcode_t& rc) -> void
   {
@@ -295,11 +339,121 @@ auto Control::rc_carriage_set_span(const rcode_t& rc) -> void
   {
     auto_set_home();
     auto_set_max();
-    Log::info()("carriage_max_ == ", config_.carriage_max_, "\n");
+    Log::info()("carriage_max_ == ", config_.carriage_max_);
+  }
+auto Control::rc_log_info(const rcode_t& rc) -> void
+  {
+    auto set_logger_state = [&](const auto& lname, bool requested_state)
+      {
+        auto set_for_logger = [&](auto& logger)
+        {
+          constexpr bool enabled = true;
+          const char* state_string = requested_state == enabled? "enabled" : "disabled";
+          logger.set_enabled(requested_state);
+          Log::info()("Logging ", state_string, " for \"", lname, "\" messages.");
+        };
+        if(lname == "error")   { set_for_logger(Log::error());   }
+        if(lname == "warning") { set_for_logger(Log::warning()); }
+        if(lname == "info")    { set_for_logger(Log::info());    }
+        if(lname == "debug")   { set_for_logger(Log::debug());   }
+      };
+    auto last_dot = rc.name().lastIndexOf('.');
+    if(last_dot <0 || static_cast<unsigned>(last_dot) == rc.name().length())
+    {
+      Log::error()("Parse error; suffix not found"); 
+      return;
+    }
+    auto logger_name = rc.name().substring(last_dot + 1); 
+    auto result = data_to_bool(rc.data());
+    if(result.first == true)
+    {
+      const auto& requested_state = result.second;
+      set_logger_state(logger_name, requested_state);
+    }
+    else
+    {
+      error_expected_bool(rc.data());
+    }
+  }
+auto Control::rc_platform_move_steps(const rcode_t& rc) -> void
+  {
+    auto result = data_to_int(rc.data());
+    if(result.first == true)
+    {
+      const auto& steps = result.second;
+      Log::info()("Moving platform ", steps, " steps");
+      platform_.resume();
+      platform_.set_speed(config_.platform_speed_);
+      platform_.step(steps);
+      platform_.standby();
+
+//      auto_standby(platform_, [&]
+//        {
+//          platform_.set_speed(config_.platform_speed_);
+//          platform_.step(steps);
+//        }
+//      );
+    }
+    else
+    {
+      error_expected_int(rc.data());
+      halt();
+    }
+  }
+auto Control::rc_platform_speed(const rcode_t& rc) -> void
+  {
+    auto do_get_speed = [&]
+      {
+        Serial.println(config_.platform_speed_);
+      };
+    auto do_set_speed = [&]
+      {
+        auto result = data_to_int(rc.data());
+        if(result.first == true)
+        {
+          config_.platform_speed_ = result.second;
+        }
+        else
+        {
+          Log::error()("Could not set speed; argument conversion error.");
+        }
+      };
+    switch(rc.command())
+    {
+    case rcode_t::Command::get:
+      do_get_speed();
+      break;
+    case rcode_t::Command::set:
+      do_set_speed(); 
+      do_get_speed(); 
+      break;
+    default:
+      Log::error()("Invalid subcommand");
+    }
+  }
+auto Control::rc_rangefinder_ping(const rcode_t& rc) -> void
+  {
+    VL53L0X_RangingMeasurementData_t measure;
+    Log::info()("Single range measurement");
+    tof_sensor_.rangingTest(&measure, false);
+    if (measure.RangeStatus != 4) {  // phase failures have incorrect data
+      Serial.println(measure.RangeMilliMeter);
+    } else {
+      Log::info()("Out of range ");
+    }
   }
 auto Control::rc_reboot(const rcode_t& rc) -> void
   {
     reboot();
+  }
+auto Control::rc_system_poll(const rcode_t& rc) -> void
+  {
+    for_each_function(
+      [&](auto& f)
+        {
+          Serial.println(f.name);
+        }
+    );
   }
 //============================================================================
 // "test" functions

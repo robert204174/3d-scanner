@@ -35,7 +35,7 @@ public:
       static Log l;
       return l;
     }
-  static auto debug() -> Log&
+  static auto warning() -> Log&
     {
       static Log l;
       return l;
@@ -45,18 +45,33 @@ public:
       static Log l;
       return l;
     }
+  static auto debug() -> Log&
+    {
+      static Log l;
+      return l;
+    }
   template<typename...ArgsT>
-  auto operator()(ArgsT&&...args) -> void { return write(args...); }
-private:
-  bool is_enabled_ = true;
+  auto operator()(ArgsT&&...args) -> void { return print(args...); }
 
+  auto set_enabled(bool b) -> void
+    {
+      is_enabled_ = b;
+    }
   auto enable() -> void
     {
-      is_enabled_ = true;
+      set_enabled(true);
     }
   auto disable() -> void
     { 
-      is_enabled_ = false;
+      set_enabled(false);
+    }
+private:
+  bool is_enabled_ = true;
+
+  template<typename...ArgsT>
+  auto print(ArgsT...args)
+    {
+      write(args..., "\n");
     }
   template<typename FirstT>
   auto write(FirstT&& first) -> void

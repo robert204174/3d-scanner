@@ -33,5 +33,6 @@ void setup() {
 }
 
 void loop() {
+  Log::info()("READY");
   control.run_command_processor();
 }

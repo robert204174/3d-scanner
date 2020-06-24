@@ -24,29 +24,33 @@ SOFTWARE.
 #ifndef rcode_hpp_20200615_113748_PDT
 #define rcode_hpp_20200615_113748_PDT
 
+#include "rcode_lexer.hpp"
 #include <stddef.h>
 #include <Arduino.h>
 
-template<typename T, typename U>
+template<typename T>
 class RCode final
 {
   static constexpr char set_command_prefix_ = '+';
   static constexpr char get_command_prefix_ = '-';
   static constexpr char delimiter_          = ':';
 public:
-  using target_t    = T;
-  using string_t    = U;
-  using getter_t    = auto(target_t::*)(void) -> const string_t&;
-  using setter_t    = auto(target_t::*)(const string_t&) -> void;
+  using string_t    = T;
 
-  enum class Command { Invalid, Get, Set };
+  enum class Command { invalid, get, set };
+  enum class Error   
+    { ok
+    , expected_end_of_line
+    , expected_identifier 
+    , invalid_data 
+    };
 
-  RCode(const RCode&) = delete;
-  RCode(RCode&&) = delete;
+  RCode(const RCode&) = default;
+  RCode(RCode&&) = default;
 
   RCode(const string_t& n, Command c, const string_t& d) noexcept
-  : name_(n)
-  , command_(c)
+  : command_(c)
+  , name_(n)
   , data_(d)
     {
     }
@@ -55,7 +59,7 @@ public:
     {
     }
   RCode(const string_t& n) noexcept
-  : RCode(n, Command::Invalid)
+  : RCode(n, Command::invalid)
     {
     }
   RCode() noexcept
@@ -64,60 +68,78 @@ public:
     }
   ~RCode() noexcept {}
 
-  auto name() const           -> const string_t&  { return name_; }
-  auto command() const        -> const Command&   { return command_; }
-  auto data() const           -> const string_t&  { return data_; }
-  static auto parse(const string_t& s) -> RCode 
+  auto name() const           -> const string_t&  { return name_;     }
+  auto command() const        -> const Command&   { return command_;  }
+  auto data() const           -> const string_t&  { return data_;     }
+  auto error() const          -> const Error&     { return error_;    }
+
+  static auto parse(const string_t& source) -> RCode 
     {
-      Command command = Command::Invalid;
-      string_t name;
-      string_t data;
-      enum Mode { mode_error, mode_command, mode_name, mode_data } mode = mode_command;
-      using sz_t = decltype(s.length());
-      using char_t = decltype(s[0]);
-      for(sz_t i = 0; i < s.length() && mode != mode_error; ++i)
-      {
-        char_t ch = s[i];
-        switch(mode)
+      RCode result;
+      using lexer_t = rcode_lexer<string_t>;
+      using token_t = decltype(lexer_t(source).scan());
+      auto lexer = lexer_t(source); 
+      auto expect_end_of_line = [&]
         {
-        case mode_command:
-          switch(ch)
+          auto eol_token = lexer.scan();
+          if( eol_token.id != token_t::END_OF_LINE)
           {
-          case set_command_prefix_:
-            command = Command::Set; 
-            mode = mode_name;
-            break;
-          case get_command_prefix_:
-            command = Command::Get;
-            mode = mode_name;
-            break;
-          default:
-            command = Command::Invalid;
-            mode = mode_error;
+            result.error_ = Error::expected_end_of_line;
           }
-          break;
-        case mode_name:
-          if(isalnum(ch) || ch == '_' || ch == '.')
+        };
+      auto expect_data = [&]
+        {
+          auto data_token = lexer.scan();
+          if( data_token.id == token_t::INTEGER
+           || data_token.id == token_t::FLOAT
+           || data_token.id == token_t::STRING
+          )
           {
-            name += ch;
+            result.data_ = lexer.get_symbol(data_token);
           }
-          else if(ch == delimiter_)
+          else
           {
-            mode = mode_data;
+            result.error_   = Error::invalid_data;
           }
-          break;
-        case mode_data:
-          data += ch;
-          break;
-        default: 
-          break;
-        }
-      }
-      return RCode(name, command, data);
+        };
+      auto allow_assignment_op = [&]
+        {
+          auto assignment_token = lexer.scan();
+          if(assignment_token.id == token_t::OP_ASSIGN)
+          {
+            result.command_ = Command::set;
+            expect_data();
+          }
+          else
+          {
+            result.command_ = Command::get;
+            expect_end_of_line();
+          }
+        };
+      auto expect_identifier = [&]
+        {
+          auto id_token = lexer.scan();
+          if(id_token.id == token_t::IDENTIFIER)
+          {
+            result.name_ = lexer.get_symbol(id_token);
+            allow_assignment_op();
+          }
+          else if(id_token.id == token_t::INVALID)
+          {
+            result.error_ = Error::expected_identifier;
+          }
+        };
+      auto start_parsing = [&]
+        {
+          expect_identifier();
+        };
+      start_parsing();
+      return result;
     }
 private:
+  Command     command_ = Command::invalid;
+  Error       error_   = Error::ok;
   string_t    name_;
-  Command     command_;
   string_t    data_;
 };
 
